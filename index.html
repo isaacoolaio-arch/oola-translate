@@ -103,6 +103,9 @@
   audio{width:100%;margin-top:10px}
   .hidden{display:none!important}
   .small{font-size:12px;color:var(--mut)}
+  .burnopts{display:flex;gap:8px;flex-wrap:wrap}
+  .burnopts label{flex:1;min-width:90px;font-size:11px;color:var(--mut);display:flex;flex-direction:column;gap:4px}
+  .burnopts select{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:8px;font-size:13px}
 </style>
 </head>
 <body>
@@ -174,7 +177,33 @@
         <button class="btn ghost" id="btnTxt">Download .txt</button>
       </div>
       <div id="burnWrap" class="hidden" style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px">
-        <button class="btn primary" id="btnBurn">Burn subtitles into video</button>
+        <div class="burnopts">
+          <label>Size
+            <select id="subSize">
+              <option value="14">Small</option>
+              <option value="18" selected>Medium</option>
+              <option value="24">Large</option>
+              <option value="30">Extra large</option>
+            </select>
+          </label>
+          <label>Colour
+            <select id="subColour">
+              <option value="&H00FFFFFF" selected>White</option>
+              <option value="&H0000FFFF">Yellow</option>
+              <option value="&H0000FF00">Green</option>
+              <option value="&H0000A5FF">Orange</option>
+              <option value="&H00FFFFFF" data-b="1">White (boxed)</option>
+            </select>
+          </label>
+          <label>Position
+            <select id="subPos">
+              <option value="2" selected>Bottom</option>
+              <option value="8">Top</option>
+              <option value="5">Middle</option>
+            </select>
+          </label>
+        </div>
+        <button class="btn primary" id="btnBurn" style="margin-top:10px">Burn subtitles into video</button>
         <div class="prog hidden" id="burnProgWrap"><i id="burnProgBar"></i></div>
         <div class="status" id="burnStatus"></div>
         <div class="small" style="margin-top:6px">Creates a new MP4 with the English subtitles permanently on the picture — plays anywhere. Re-encodes in your browser, so long videos can take several minutes on older laptops.</div>
@@ -566,7 +595,16 @@ async function burnSubtitles(){
     await ff.writeFile(srtName, new TextEncoder().encode(buildSrt(result.segments)));
 
     // Burn: white text, black outline, bottom-center. Re-encode video, copy audio.
-    const style="FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=25";
+    // Build style from the user's chosen size / colour / position.
+    const size=$('subSize').value;
+    const colOpt=$('subColour').selectedOptions[0];
+    const colour=colOpt.value;
+    const boxed=colOpt.dataset.b==='1';
+    const align=$('subPos').value;
+    // BorderStyle 3 = opaque box behind text; 1 = outline+shadow.
+    const style = boxed
+      ? `FontSize=${size},PrimaryColour=${colour},BorderStyle=3,BackColour=&H80000000,Outline=0,Shadow=0,Alignment=${align},MarginV=25`
+      : `FontSize=${size},PrimaryColour=${colour},OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=${align},MarginV=25`;
     await ff.exec([
       '-i', inName,
       '-vf', `subtitles=${srtName}:force_style='${style}'`,
