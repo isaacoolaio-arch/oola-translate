@@ -566,16 +566,21 @@ async function loadFFmpeg(){
   if(ffmpegInstance) return ffmpegInstance;
   bstat('Loading video engine (one-time, ~31MB)…'); bprog(4);
   // Single-thread core: NO SharedArrayBuffer / COOP-COEP needed, so it works on GitHub Pages.
-  // toBlobURL fetches the CDN files and serves them as same-origin blobs (avoids worker origin issues).
-  const { FFmpeg } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js');
-  const { toBlobURL } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js');
-  const core='https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
+  // The ffmpeg wrapper spawns an internal Worker; browsers block cross-origin worker scripts,
+  // so we convert EVERY piece (wrapper worker + core + wasm) to same-origin blob URLs.
+  const ver='0.12.10', coreVer='0.12.6', utilVer='0.12.1';
+  const { FFmpeg } = await import(`https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@${ver}/dist/esm/index.js`);
+  const { toBlobURL } = await import(`https://cdn.jsdelivr.net/npm/@ffmpeg/util@${utilVer}/dist/esm/index.js`);
+  const wrap=`https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@${ver}/dist/esm`;
+  const core=`https://cdn.jsdelivr.net/npm/@ffmpeg/core@${coreVer}/dist/umd`;
   const ff=new FFmpeg();
   ff.on('progress',({progress})=>{ if(progress>=0&&progress<=1){ bprog(20+progress*75); bstat(`Burning subtitles… ${Math.round(progress*100)}%`); } });
-  await ff.load({
-    coreURL: await toBlobURL(`${core}/ffmpeg-core.js`,'text/javascript'),
-    wasmURL: await toBlobURL(`${core}/ffmpeg-core.wasm`,'application/wasm')
-  });
+  const [coreURL, wasmURL, classWorkerURL] = await Promise.all([
+    toBlobURL(`${core}/ffmpeg-core.js`,'text/javascript'),
+    toBlobURL(`${core}/ffmpeg-core.wasm`,'application/wasm'),
+    toBlobURL(`${wrap}/worker.js`,'text/javascript')   // <- the piece that was failing cross-origin
+  ]);
+  await ff.load({ coreURL, wasmURL, classWorkerURL });
   ffmpegInstance=ff; return ff;
 }
 
@@ -608,7 +613,7 @@ async function burnSubtitles(){
     await ff.exec([
       '-i', inName,
       '-vf', `subtitles=${srtName}:force_style='${style}'`,
-      '-c:v','libx264','-preset','veryfast','-crf','23',
+      '-c:v','libx264','-preset','ultrafast','-crf','25',
       '-c:a','copy',
       outName
     ]);
