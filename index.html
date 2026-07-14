@@ -401,7 +401,18 @@ async function translateBrowser(wavBlob, duration){
   const ab=await wavBlob.arrayBuffer();
   const audio=await ac.decodeAudioData(ab); ac.close();
   const out=await pipe(audio.getChannelData(0), {
-    task:'translate', return_timestamps:true, chunk_length_s:30, stride_length_s:5
+    task:'translate',
+    return_timestamps:true,
+    chunk_length_s:30,
+    stride_length_s:5,
+    // --- anti-repetition guardrails (the "da da da" loop fix) ---
+    no_repeat_ngram_size:3,          // forbid any 3-gram from repeating back-to-back
+    repetition_penalty:1.3,          // penalise tokens already used recently
+    condition_on_previous_text:false,// stop one bad chunk from poisoning the next
+    compression_ratio_threshold:2.4, // Whisper drops chunks that compress too well (= looping)
+    logprob_threshold:-1.0,          // drop low-confidence (likely hallucinated) chunks
+    no_speech_threshold:0.6,         // treat near-silence / noise as no speech
+    temperature:0                    // greedy; deterministic
   });
   let segments=[];
   if(out.chunks&&out.chunks.length){
@@ -409,7 +420,41 @@ async function translateBrowser(wavBlob, duration){
   } else {
     segments=[{start:0,end:duration,text:(out.text||'').trim()}];
   }
-  return { text:(out.text||'').trim(), segments };
+  // Post-process: collapse any surviving repetition runs as a safety net.
+  segments=segments.map(s=>({ ...s, text:deloop(s.text) })).filter(s=>s.text);
+  const fullText=deloop(segments.map(s=>s.text).join(' '));
+  return { text:fullText, segments };
+}
+
+/* Collapse runaway repetition: "da da da da ... aquí" -> "da aquí".
+   Handles single-word loops and short-phrase loops (2-4 words). */
+function deloop(text){
+  if(!text) return text;
+  let words=text.trim().split(/\s+/);
+  // pass 1: collapse immediate single-word repeats (case-insensitive), keep max 1
+  let out=[];
+  for(const w of words){
+    const last=out[out.length-1];
+    if(last && last.toLowerCase().replace(/[.,!?]/g,'')===w.toLowerCase().replace(/[.,!?]/g,'')) continue;
+    out.push(w);
+  }
+  // pass 2: collapse repeating short phrases (2..4 words repeated 3+ times)
+  for(let plen=2; plen<=4; plen++){
+    const res=[];
+    let i=0;
+    while(i<out.length){
+      let reps=1;
+      const phrase=out.slice(i,i+plen).join(' ').toLowerCase();
+      while(i+(reps+1)*plen<=out.length &&
+            out.slice(i+reps*plen, i+(reps+1)*plen).join(' ').toLowerCase()===phrase){
+        reps++;
+      }
+      if(reps>=3){ for(let k=0;k<plen;k++) res.push(out[i+k]); i+=reps*plen; }
+      else { res.push(out[i]); i++; }
+    }
+    out=res;
+  }
+  return out.join(' ').replace(/\s+([.,!?])/g,'$1').trim();
 }
 
 /* ---------------- main translate flow ---------------- */
