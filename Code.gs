@@ -1,44 +1,50 @@
 /**
- * Oola Translate — GAS proxy for OpenAI Whisper (audio -> English text + segments)
+ * Oola Translate — GAS proxy for Groq Whisper (audio -> English text + segments)
  *
- * SETUP (do this once, whenever you're ready to enable the API path):
+ * Groq runs whisper-large-v3, so accuracy is high and the "da da da" repetition
+ * loop that the small in-browser model hits does NOT happen here.
+ *
+ * SETUP (once):
  *   1. Deploy: New deployment -> Web app -> Execute as "Me" -> Access "Anyone".
  *   2. Copy the /exec URL into the app's Settings.
- *   3. When you have an OpenAI key, add it WITHOUT redeploying:
+ *   3. Get a Groq key at https://console.groq.com/keys (free tier available).
+ *   4. Add it WITHOUT redeploying:
  *        Project Settings (gear) -> Script Properties -> Add property
- *        Property: OPENAI_API_KEY   Value: sk-...
+ *        Property: GROQ_API_KEY   Value: gsk_...
  *
- * The frontend sends base64 audio. If the key isn't set, this returns
- * { ok:false, reason:"NO_KEY" } so the app falls back to in-browser Whisper.
+ * If no key is set, returns { ok:false, reason:"NO_KEY" } and the app
+ * falls back to in-browser Whisper.
  */
+
+var GROQ_URL = 'https://api.groq.com/openai/v1/audio/translations';
+var GROQ_MODEL = 'whisper-large-v3';
 
 function doPost(e) {
   try {
     var body = JSON.parse(e.postData.contents || '{}');
 
     if (body.ping) {
-      return _json({ ok: true, hasKey: !!_key(), version: 'oola-translate-gas-v1' });
+      return _json({ ok: true, hasKey: !!_key(), provider: 'groq', version: 'oola-translate-gas-v2' });
     }
 
     var key = _key();
     if (!key) return _json({ ok: false, reason: 'NO_KEY' });
-
     if (!body.audioBase64) return _json({ ok: false, reason: 'NO_AUDIO' });
 
     var bytes = Utilities.base64Decode(body.audioBase64);
-    var blob = Utilities.newBlob(bytes, body.mimeType || 'audio/mpeg',
-                                 body.filename || 'audio.mp3');
+    var blob = Utilities.newBlob(bytes, body.mimeType || 'audio/wav',
+                                 body.filename || 'audio.wav');
 
-    // Whisper /audio/translations -> always outputs ENGLISH.
-    // verbose_json gives us segment timestamps for the .srt file.
+    // /audio/translations -> always outputs ENGLISH.
+    // verbose_json gives segment timestamps for the .srt file.
     var form = {
       file: blob,
-      model: 'whisper-1',
+      model: GROQ_MODEL,
       response_format: 'verbose_json'
     };
     if (body.prompt) form.prompt = body.prompt;
 
-    var res = UrlFetchApp.fetch('https://api.openai.com/v1/audio/translations', {
+    var res = UrlFetchApp.fetch(GROQ_URL, {
       method: 'post',
       headers: { Authorization: 'Bearer ' + key },
       payload: form,
@@ -64,11 +70,13 @@ function doPost(e) {
 }
 
 function doGet() {
-  return _json({ ok: true, hasKey: !!_key(), version: 'oola-translate-gas-v1' });
+  return _json({ ok: true, hasKey: !!_key(), provider: 'groq', version: 'oola-translate-gas-v2' });
 }
 
+// Prefer GROQ_API_KEY; fall back to OPENAI_API_KEY if you ever switch back.
 function _key() {
-  return PropertiesService.getScriptProperties().getProperty('OPENAI_API_KEY');
+  var p = PropertiesService.getScriptProperties();
+  return p.getProperty('GROQ_API_KEY') || p.getProperty('OPENAI_API_KEY');
 }
 
 function _json(obj) {
