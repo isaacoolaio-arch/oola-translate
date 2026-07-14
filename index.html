@@ -177,36 +177,47 @@
         <button class="btn ghost" id="btnTxt">Download .txt</button>
       </div>
       <div id="burnWrap" class="hidden" style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px">
-        <div class="burnopts">
-          <label>Size
-            <select id="subSize">
-              <option value="14">Small</option>
-              <option value="18" selected>Medium</option>
-              <option value="24">Large</option>
-              <option value="30">Extra large</option>
-            </select>
-          </label>
-          <label>Colour
-            <select id="subColour">
-              <option value="&H00FFFFFF" selected>White</option>
-              <option value="&H0000FFFF">Yellow</option>
-              <option value="&H0000FF00">Green</option>
-              <option value="&H0000A5FF">Orange</option>
-              <option value="&H00FFFFFF" data-b="1">White (boxed)</option>
-            </select>
-          </label>
-          <label>Position
-            <select id="subPos">
-              <option value="2" selected>Bottom</option>
-              <option value="8">Top</option>
-              <option value="5">Middle</option>
-            </select>
+        <div class="toggle" style="margin-bottom:10px">
+          <div class="lbl">Burn subtitles into video
+            <small>Off keeps it disabled so nothing downloads. Turn on only when you want a subbed MP4 (slow on this laptop — the desktop .bat is faster for long videos).</small>
+          </div>
+          <label class="sw">
+            <input type="checkbox" id="burnToggle">
+            <span class="track"></span><span class="knob"></span>
           </label>
         </div>
-        <button class="btn primary" id="btnBurn" style="margin-top:10px">Burn subtitles into video</button>
-        <div class="prog hidden" id="burnProgWrap"><i id="burnProgBar"></i></div>
-        <div class="status" id="burnStatus"></div>
-        <div class="small" style="margin-top:6px">Creates a new MP4 with the English subtitles permanently on the picture — plays anywhere. Re-encodes in your browser, so long videos can take several minutes on older laptops.</div>
+        <div id="burnBody" class="hidden">
+          <div class="burnopts">
+            <label>Size
+              <select id="subSize">
+                <option value="14">Small</option>
+                <option value="18" selected>Medium</option>
+                <option value="24">Large</option>
+                <option value="30">Extra large</option>
+              </select>
+            </label>
+            <label>Colour
+              <select id="subColour">
+                <option value="&H00FFFFFF" selected>White</option>
+                <option value="&H0000FFFF">Yellow</option>
+                <option value="&H0000FF00">Green</option>
+                <option value="&H0000A5FF">Orange</option>
+                <option value="&H00FFFFFF" data-b="1">White (boxed)</option>
+              </select>
+            </label>
+            <label>Position
+              <select id="subPos">
+                <option value="2" selected>Bottom</option>
+                <option value="8">Top</option>
+                <option value="5">Middle</option>
+              </select>
+            </label>
+          </div>
+          <button class="btn primary" id="btnBurn" style="margin-top:10px">Burn subtitles into video</button>
+          <div class="prog hidden" id="burnProgWrap"><i id="burnProgBar"></i></div>
+          <div class="status" id="burnStatus"></div>
+          <div class="small" style="margin-top:6px">Creates a new MP4 with the subtitles permanently on the picture — plays anywhere. Re-encodes in your browser; first use downloads a ~31MB engine (one-time, then cached).</div>
+        </div>
       </div>
     </div>
 
@@ -249,6 +260,8 @@ const LS = {
   set model(v){ localStorage.setItem('ot_model', v); },
   get eng(){ return localStorage.getItem('ot_eng')==='1'; },
   set eng(v){ localStorage.setItem('ot_eng', v?'1':'0'); },
+  get burnOn(){ return localStorage.getItem('ot_burn')==='1'; },
+  set burnOn(v){ localStorage.setItem('ot_burn', v?'1':'0'); },
 };
 let picked = null;      // { file, isVideo, url }
 let result = null;      // { text, segments:[{start,end,text}] }
@@ -585,6 +598,7 @@ async function loadFFmpeg(){
 }
 
 async function burnSubtitles(){
+  if(!LS.burnOn) return;
   if(!picked||!picked.isVideo||!result?.segments?.length) return;
   $('btnBurn').disabled=true;
   try{
@@ -639,6 +653,11 @@ async function burnSubtitles(){
   }
 }
 $('btnBurn').onclick=burnSubtitles;
+
+/* Burn enable toggle — off keeps the 31MB engine and controls dormant. */
+$('burnToggle').checked=LS.burnOn;
+$('burnBody').classList.toggle('hidden', !LS.burnOn);
+$('burnToggle').onchange=e=>{ LS.burnOn=e.target.checked; $('burnBody').classList.toggle('hidden', !e.target.checked); };
 
 /* ---------------- engine toggle ---------------- */
 $('engToggle').checked=LS.eng;
