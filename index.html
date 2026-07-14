@@ -173,6 +173,12 @@
         <button class="btn ghost" id="btnSrt">Download .srt</button>
         <button class="btn ghost" id="btnTxt">Download .txt</button>
       </div>
+      <div id="burnWrap" class="hidden" style="margin-top:12px;border-top:1px solid var(--line);padding-top:12px">
+        <button class="btn primary" id="btnBurn">Burn subtitles into video</button>
+        <div class="prog hidden" id="burnProgWrap"><i id="burnProgBar"></i></div>
+        <div class="status" id="burnStatus"></div>
+        <div class="small" style="margin-top:6px">Creates a new MP4 with the English subtitles permanently on the picture — plays anywhere. Re-encodes in your browser, so long videos can take several minutes on older laptops.</div>
+      </div>
     </div>
 
   </div>
@@ -186,8 +192,8 @@
       <label class="fld">GAS proxy URL (cloud API path)</label>
       <input class="txt" id="gasUrl" placeholder="https://script.google.com/macros/s/…/exec">
       <div class="help">
-        Paste your Apps Script <code>/exec</code> URL. The OpenAI key lives in the
-        script's <code>Script Properties</code> as <code>OPENAI_API_KEY</code> —
+        Paste your Apps Script <code>/exec</code> URL. The API key lives in the
+        script's <code>Script Properties</code> as <code>GROQ_API_KEY</code> —
         never in this app. Leave blank to use only in-browser Whisper.
       </div>
       <label class="fld">In-browser model size</label>
@@ -511,6 +517,9 @@ function renderResult(){
   }
   $('vPlain').style.opacity = viewMode==='plain'?'1':'.55';
   $('vTimed').style.opacity = viewMode==='timed'?'1':'.55';
+  // Burn-in only makes sense for a video with subtitle segments.
+  const canBurn = picked && picked.isVideo && result.segments && result.segments.length;
+  $('burnWrap').classList.toggle('hidden', !canBurn);
 }
 function escapeHtml(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 $('vPlain').onclick=()=>{viewMode='plain';renderResult();};
@@ -518,6 +527,75 @@ $('vTimed').onclick=()=>{viewMode='timed';renderResult();};
 $('btnCopy').onclick=async()=>{ try{await navigator.clipboard.writeText(result.text);$('btnCopy').textContent='Copied ✓';setTimeout(()=>$('btnCopy').textContent='Copy text',1500);}catch{} };
 $('btnSrt').onclick=()=>{ if(!result?.segments?.length)return; download((picked?.file.name||'translation').replace(/\.[^.]+$/,'')+'.srt', buildSrt(result.segments)); };
 $('btnTxt').onclick=()=>{ download((picked?.file.name||'translation').replace(/\.[^.]+$/,'')+'.txt', result.text||''); };
+
+/* ---------------- burn subtitles into video (ffmpeg.wasm) ---------------- */
+let ffmpegInstance=null;
+function bprog(pct){ const w=$('burnProgWrap'),b=$('burnProgBar'); if(pct==null){w.classList.add('hidden');return;} w.classList.remove('hidden'); b.style.width=Math.max(0,Math.min(100,pct))+'%'; }
+function bstat(msg,kind){ const s=$('burnStatus'); s.textContent=msg||''; s.className='status'+(kind?' '+kind:''); }
+
+async function loadFFmpeg(){
+  if(ffmpegInstance) return ffmpegInstance;
+  bstat('Loading video engine (one-time, ~31MB)…'); bprog(4);
+  // Single-thread core: NO SharedArrayBuffer / COOP-COEP needed, so it works on GitHub Pages.
+  // toBlobURL fetches the CDN files and serves them as same-origin blobs (avoids worker origin issues).
+  const { FFmpeg } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js');
+  const { toBlobURL } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js');
+  const core='https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
+  const ff=new FFmpeg();
+  ff.on('progress',({progress})=>{ if(progress>=0&&progress<=1){ bprog(20+progress*75); bstat(`Burning subtitles… ${Math.round(progress*100)}%`); } });
+  await ff.load({
+    coreURL: await toBlobURL(`${core}/ffmpeg-core.js`,'text/javascript'),
+    wasmURL: await toBlobURL(`${core}/ffmpeg-core.wasm`,'application/wasm')
+  });
+  ffmpegInstance=ff; return ff;
+}
+
+async function burnSubtitles(){
+  if(!picked||!picked.isVideo||!result?.segments?.length) return;
+  $('btnBurn').disabled=true;
+  try{
+    bprog(2); bstat('Preparing…');
+    const ff=await loadFFmpeg();
+    const { fetchFile } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js');
+    const inName='in'+(picked.file.name.match(/\.[^.]+$/)?.[0]||'.mp4');
+    const srtName='subs.srt';
+    const outName='out.mp4';
+
+    bstat('Loading video into engine…'); bprog(10);
+    await ff.writeFile(inName, await fetchFile(picked.file));
+    await ff.writeFile(srtName, new TextEncoder().encode(buildSrt(result.segments)));
+
+    // Burn: white text, black outline, bottom-center. Re-encode video, copy audio.
+    const style="FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=25";
+    await ff.exec([
+      '-i', inName,
+      '-vf', `subtitles=${srtName}:force_style='${style}'`,
+      '-c:v','libx264','-preset','veryfast','-crf','23',
+      '-c:a','copy',
+      outName
+    ]);
+
+    bstat('Finalizing…'); bprog(97);
+    const data=await ff.readFile(outName);
+    const blob=new Blob([data.buffer],{type:'video/mp4'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url; a.download=(picked.file.name.replace(/\.[^.]+$/,''))+'_subbed.mp4'; a.click();
+    setTimeout(()=>URL.revokeObjectURL(url),8000);
+
+    // free ffmpeg FS
+    try{ await ff.deleteFile(inName); await ff.deleteFile(srtName); await ff.deleteFile(outName); }catch{}
+
+    bprog(100); bstat('Done — subbed video downloaded.','ok');
+    setTimeout(()=>bprog(null),800);
+  }catch(err){
+    console.error(err);
+    bstat('Burn failed: '+(err.message||err),'err'); bprog(null);
+  }finally{
+    $('btnBurn').disabled=false;
+  }
+}
+$('btnBurn').onclick=burnSubtitles;
 
 /* ---------------- engine toggle ---------------- */
 $('engToggle').checked=LS.eng;
@@ -542,7 +620,7 @@ $('btnTest').onclick=async()=>{
   try{
     const r=await fetch(url,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({ping:true})});
     const d=await r.json();
-    if(d.ok){ st.textContent = d.hasKey ? 'Connected ✓ — OpenAI key is set.' : 'Connected ✓ — but no OpenAI key yet (will fall back to in-browser).'; st.className='status ok'; }
+    if(d.ok){ st.textContent = d.hasKey ? 'Connected ✓ — API key is set.' : 'Connected ✓ — but no API key yet (will fall back to in-browser).'; st.className='status ok'; }
     else { st.textContent='Reached proxy but got: '+(d.reason||'error'); st.className='status err'; }
   }catch(e){ st.textContent='Could not reach proxy. Check the URL / deployment access.'; st.className='status err'; }
 };
