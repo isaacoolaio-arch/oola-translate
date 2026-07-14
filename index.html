@@ -298,7 +298,23 @@ async function extractAudioWav(file, onProg){
   onProg&&onProg(50);
 
   const wav=encodeWav(rendered);
-  return { blob:wav, duration:decoded.duration };
+  return { blob:wav, duration:decoded.duration, buffer:rendered };
+}
+/* Slice a rendered 16k mono AudioBuffer into a WAV for [startSec,endSec). */
+function sliceBufferToWav(buffer, startSec, endSec){
+  const rate=buffer.sampleRate;
+  const s=Math.max(0,Math.floor(startSec*rate));
+  const e=Math.min(buffer.length,Math.floor(endSec*rate));
+  const len=Math.max(0,e-s);
+  const src=buffer.getChannelData(0);
+  const buf=new ArrayBuffer(44+len*2), view=new DataView(buf);
+  const wr=(o,str)=>{for(let i=0;i<str.length;i++)view.setUint8(o+i,str.charCodeAt(i));};
+  wr(0,'RIFF'); view.setUint32(4,36+len*2,true); wr(8,'WAVE'); wr(12,'fmt ');
+  view.setUint32(16,16,true); view.setUint16(20,1,true); view.setUint16(22,1,true);
+  view.setUint32(24,rate,true); view.setUint32(28,rate*2,true);
+  view.setUint16(32,2,true); view.setUint16(34,16,true); wr(36,'data'); view.setUint32(40,len*2,true);
+  let o=44; for(let i=s;i<e;i++){ let v=Math.max(-1,Math.min(1,src[i])); view.setInt16(o,v<0?v*0x8000:v*0x7FFF,true); o+=2; }
+  return new Blob([view],{type:'audio/wav'});
 }
 function encodeWav(audioBuffer){
   const ch=audioBuffer.getChannelData(0), len=ch.length, rate=audioBuffer.sampleRate;
@@ -316,10 +332,10 @@ function blobToBase64(blob){
 }
 
 /* ---------------- cloud path (GAS -> Whisper) ---------------- */
-async function translateCloud(wavBlob){
+/* Low-level: send ONE wav blob, get {text,segments}. Throws soft errors up. */
+async function cloudSendOne(wavBlob){
   const url=LS.gas;
   if(!url) throw {soft:'NO_GAS'};
-  setStatus('Uploading to cloud…'); prog(65);
   const b64=await blobToBase64(wavBlob);
   const r=await fetch(url,{ method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'},
     body: JSON.stringify({ audioBase64:b64, mimeType:'audio/wav', filename:'audio.wav' }) });
@@ -328,8 +344,42 @@ async function translateCloud(wavBlob){
     if(data.reason==='NO_KEY') throw {soft:'NO_KEY'};
     throw new Error(data.detail||data.reason||'Cloud error');
   }
+  return { text:(data.text||'').trim(), segments:data.segments||[] };
+}
+
+/* Single-shot cloud (small files). */
+async function translateCloud(wavBlob){
+  if(!LS.gas) throw {soft:'NO_GAS'};
+  setStatus('Uploading to cloud…'); prog(65);
+  const out=await cloudSendOne(wavBlob);
   prog(95);
-  return { text:data.text, segments:data.segments||[] };
+  return out;
+}
+
+/* Chunked cloud (long files). Splits the rendered audio into time windows that
+   each stay under the 25MB cap, sends them in order, offsets each chunk's
+   timestamps by its real start time, then stitches text + segments back. */
+async function translateCloudChunked(buffer, duration){
+  if(!LS.gas) throw {soft:'NO_GAS'};
+  // 16k mono ~= 32KB/sec. 600s ~= 19MB WAV, safely under 25MB (incl. base64 overhead we mind below).
+  // base64 inflates ~33%, so keep raw chunk WAV under ~17MB -> ~520s. Use 480s (8 min) for margin.
+  const CHUNK_SEC=480;
+  const n=Math.ceil(duration/CHUNK_SEC);
+  let allText=[]; let allSegs=[];
+  for(let i=0;i<n;i++){
+    const start=i*CHUNK_SEC;
+    const end=Math.min(duration,(i+1)*CHUNK_SEC);
+    setStatus(`Uploading part ${i+1} of ${n}…`);
+    prog(60 + Math.round((i/n)*35));
+    const wav=sliceBufferToWav(buffer,start,end);
+    const part=await cloudSendOne(wav);       // soft errors (NO_KEY/NO_GAS) bubble up on first chunk
+    if(part.text) allText.push(part.text);
+    for(const s of (part.segments||[])){
+      allSegs.push({ start:(s.start||0)+start, end:(s.end||0)+start, text:s.text });
+    }
+  }
+  prog(95);
+  return { text:allText.join(' ').trim(), segments:allSegs };
 }
 
 /* ---------------- browser path (transformers.js Whisper) ---------------- */
@@ -368,19 +418,21 @@ $('btnGo').onclick=async()=>{
   $('btnGo').disabled=true; $('cardResult').classList.add('hidden'); result=null;
   try{
     setStatus('Extracting audio…'); prog(5);
-    const { blob, duration } = await extractAudioWav(picked.file, prog);
+    const { blob, duration, buffer } = await extractAudioWav(picked.file, prog);
     const sizeMB=blob.size/1048576;
 
     const useBrowser=$('engToggle').checked;
     if(useBrowser){
       result=await translateBrowser(blob, duration);
     } else {
-      if(sizeMB>24){
-        setStatus(`Extracted audio is ${sizeMB.toFixed(0)}MB — over the 25MB cloud limit. Turn on in-browser Whisper for long files, or use a shorter clip.`,'err');
-        prog(null); $('btnGo').disabled=false; return;
-      }
+      const tooBig = sizeMB>24;
       try{
-        result=await translateCloud(blob);
+        if(tooBig){
+          // Long file: split into parts automatically so it still uses the fast cloud path.
+          result=await translateCloudChunked(buffer, duration);
+        } else {
+          result=await translateCloud(blob);
+        }
       }catch(err){
         if(err.soft==='NO_GAS'){ setStatus('No cloud URL set — switching to in-browser Whisper.','ok'); result=await translateBrowser(blob,duration); }
         else if(err.soft==='NO_KEY'){ setStatus('Cloud key not set yet — using in-browser Whisper instead.','ok'); result=await translateBrowser(blob,duration); }
